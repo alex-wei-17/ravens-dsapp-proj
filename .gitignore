@@ -21,9 +21,6 @@
 # RStudio files
 .Rproj.user/
 
-# Project data
-/data/
-
 # produced vignettes
 vignettes/*.html
 vignettes/*.pdf
@@ -50,3 +47,8 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# New additions
+/data/
+/data
+.DS_Store
