@@ -3,14 +3,15 @@
 ### Name: Zihao (Alex) Wei
 ### Date: June 2, 2026
 
-# Make sure to set working directory to the one with the data folder!
+# Make sure to set working directory to the one with the "data" folder!
 
 # Load necessary packages
 library(tidyverse)
 library(here)
-library(lme4)
 library(sportyR)
 library(gganimate)
+library(lme4)
+library(ggrepel)
 
 # Load the data (except for tracking data)
 games <- read_csv(here("data", "games.csv"))
@@ -93,7 +94,7 @@ plot_pull <- function(t, gid, pid) {
 }
 plot_pull(tracking, 2022091806, 2058)
 
-# For animating a given play
+# For animating a given play (more sense-check)
 field_params <- list(field_apron = "springgreen3",
                      field_border = "springgreen3",
                      offensive_endzone = "springgreen3",
@@ -134,14 +135,18 @@ gp_keys <- guard_pull %>% distinct(gameId, playId, nflId)
 gp_frames <- tracking %>%
   inner_join(gp_keys, by = c("gameId", "playId", "nflId")) %>%
   inner_join(snap_frames, by = c("gameId", "playId")) %>%
-  filter(frameId >= snap_frameId, frameId <= snap_frameId + 40) %>%
+  filter(frameId >= snap_frameId, frameId <= snap_frameId + 30) %>%
   group_by(gameId, playId, nflId) %>%
   arrange(frameId, .by_group = TRUE)
 
 # Calculate path efficiency of pulling guards
 guard_path_eff <- gp_frames %>%
   mutate(lat = abs(y - first(y)),
-         max_frame = frameId[which.max(lat)]) %>%
+         lat_gain = lead(lat, 3) - lat,
+         pull_start = cumany(lat >= 1),
+         pull_end = pull_start & (coalesce(lat_gain, -Inf) < 0.5),
+         max_frame = if (any(pull_end)) frameId[which.max(pull_end)]
+         else frameId[which.max(lat)]) %>%
   filter(frameId <= max_frame) %>%
   mutate(step = sqrt((x - lag(x))^2 + (y - lag(y))^2)) %>%
   summarize(path_line = sqrt((last(x) - first(x))^2 + (last(y) - first(y))^2),
@@ -163,7 +168,11 @@ guard_pull <- guard_pull %>%
 players_wt <- players %>% select(nflId, weight)
 gp_model_df <- gp_frames %>%
   mutate(lat = abs(y - first(y)),
-         max_frame = frameId[which.max(lat)]) %>%
+         lat_gain = lead(lat, 3) - lat,
+         pull_start = cumany(lat >= 1),
+         pull_end = pull_start & (coalesce(lat_gain, -Inf) < 0.5),
+         max_frame = if (any(pull_end)) frameId[which.max(pull_end)]
+         else frameId[which.max(lat)]) %>%
   filter(frameId <= max_frame) %>%
   summarize(pull_time = (last(frameId) - first(snap_frameId)) / 10,
             pull_dist = sqrt((last(x) - first(x))^2 + (last(y) - first(y))^2),
@@ -181,39 +190,114 @@ gp_lm <- lmer(pull_time ~ pull_dist + pff_runConceptPrimary +
 summary(gp_lm)
 plot(gp_lm)
 
-# Get random intercepts for each guard
-ranef(gp_lm)$nflId
+# Find pull time above/below expected for each guard
+guard_ptoe <- ranef(gp_lm)$nflId %>%
+  rownames_to_column("nflId") %>%
+  rename(pt_oe = `(Intercept)`) %>%
+  mutate(nflId = as.integer(nflId), mean_time_saved = -pt_oe) %>%
+  left_join(players %>% select(nflId, displayName), by = "nflId") %>%
+  left_join(gp_model_df %>% count(nflId, name = "n_pulls"), by = "nflId") %>%
+  arrange(desc(mean_time_saved))
 
+# Produce summary table of results
+guard_summary <- guard_pull %>%
+  group_by(nflId) %>%
+  summarize(mean_path_eff = mean(path_eff, na.rm = TRUE),
+            mean_init_burst = mean(init_burst, na.rm = TRUE),
+            n_pulls = n(), .groups = "drop") %>%
+  left_join(guard_ptoe %>% select(nflId, displayName, mean_time_saved),
+            by = "nflId") %>%
+  select(nflId, displayName, mean_path_eff,
+         mean_init_burst, mean_time_saved, n_pulls) %>%
+  filter(n_pulls >= 5) %>%
+  arrange(desc(mean_time_saved))
 
+# Save the summary table to working directory
+write_csv(guard_summary, "guard_pull_summary.csv")
 
+# Get pulling metrics (from before) for visualization
+gp_metrics <- gp_frames %>%
+  mutate(lat = abs(y - first(y)),
+         lat_gain = lead(lat, 3) - lat,
+         pull_start = cumany(lat >= 1),
+         pull_end = pull_start & (coalesce(lat_gain, -Inf) < 0.5),
+         max_frame = if (any(pull_end)) frameId[which.max(pull_end)]
+         else frameId[which.max(lat)]) %>%
+  filter(frameId <= max_frame)
 
+# Find an example play and store game, play, and guard IDs
+ep <- gp_metrics %>% ungroup() %>%
+  filter(nflId == 41264) %>%
+  distinct(gameId, playId) %>%
+  slice(1)
+ep_gid <- ep$gameId
+ep_pid <- ep$playId
+ep_nid <- 41264
 
+# Find the path of the pulling guard on example play
+ep_pull_path <- gp_metrics %>% ungroup() %>%
+  filter(gameId == ep_gid, playId == ep_pid, nflId == ep_nid) %>%
+  arrange(frameId)
 
+# Find endpoints of pulling path in a straight line
+ep_pull_ends <- ep_pull_path %>%
+  summarize(x0 = first(x), y0 = first(y), x1 = last(x), y1 = last(y))
 
+# Find other O-linemen on the same example play
+ep_context <- tracking %>%
+  filter(gameId == ep_gid, playId == ep_pid,
+         nflId %in% ol_ids, nflId != ep_nid,
+         frameId >= min(ep_pull_path$frameId),
+         frameId <= max(ep_pull_path$frameId)) %>%
+  arrange(nflId, frameId)
 
+# Plot pull path vs. straight line of pulling guard on example play
+ggplot() +
+  geom_path(data = ep_context, aes(x, y, group = nflId),
+            color = "purple", linewidth = 0.8) +
+  geom_segment(data = ep_pull_ends, aes(x0, y0, xend = x1, yend = y1),
+               color = "black", linetype = "dashed") +
+  geom_path(data = ep_pull_path, aes(x, y),
+            color = "red", linewidth = 1,
+            arrow = arrow(length = unit(0.12, "cm"), type = "closed")) +
+  geom_point(data = ep_pull_ends, aes(x0, y0), color = "red", size = 3) +
+  coord_equal() +
+  theme_bw() +
+  labs(x = "Downfield (yds)",
+       y = "Sideline (yds)",
+       title = "Guard Pull (Joel Bitonio): Actual Path vs. Straight Line",
+       subtitle = "Red = actual; Dashed = ideal; Purple = linemates") +
+  theme(axis.title = element_text(size = 10),
+        plot.title = element_text(size = 13, hjust = 0.5),
+        plot.subtitle = element_text(size = 10, hjust = 0.5))
 
+# Plot ranking of guards on time saved per pull
+guard_summary %>% filter(n_pulls >= 10) %>%
+  mutate(displayName = fct_reorder(displayName, mean_time_saved)) %>%
+  ggplot(aes(mean_time_saved, displayName)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey35") +
+  geom_point(aes(size = n_pulls), color = "navy") +
+  scale_size_continuous(range = c(1.5, 5), name = "Pulls") +
+  theme_bw() +
+  labs(x = "Mean time saved per pull (sec)",
+       y = NULL,
+       title = "Guard Pulling Times over Expected",
+       subtitle = "Right of dashed line = faster than expected") +
+  theme(axis.title = element_text(size = 10),
+        plot.title = element_text(size = 14, hjust = 0.5),
+        plot.subtitle = element_text(size = 10, hjust = 0.5))
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# Plot initial burst and path efficiency of pulling guards
+guard_summary %>%
+  ggplot(aes(mean_init_burst, mean_path_eff)) +
+  geom_point(aes(size = n_pulls), color = "navy", alpha = 0.65) +
+  geom_text_repel(aes(label = displayName), size = 1.7, max.overlaps = 7) +
+  scale_size_continuous(range = c(1.5, 5), name = "Pulls") +
+  theme_bw() +
+  labs(x = "Mean initial burst (yds/sec²)",
+       y = "Mean path efficiency (%)",
+       title = "Initial Burst vs. Path Efficiency for Pulling Guards",
+       subtitle = "Top-right = quick off the ball and a tight path") +
+  theme(axis.title = element_text(size = 10),
+        plot.title = element_text(size = 13, hjust = 0.5),
+        plot.subtitle = element_text(size = 10, hjust = 0.5))
