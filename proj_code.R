@@ -291,7 +291,7 @@ guard_summary %>% filter(n_pulls >= 10) %>%
 guard_summary %>%
   ggplot(aes(mean_init_burst, mean_path_eff)) +
   geom_point(aes(size = n_pulls), color = "navy", alpha = 0.65) +
-  geom_text_repel(aes(label = displayName), size = 1.7, max.overlaps = 7) +
+  geom_text_repel(aes(label = displayName), size = 1.8, max.overlaps = 7) +
   scale_size_continuous(range = c(1.5, 5), name = "Pulls") +
   theme_bw() +
   labs(x = "Mean initial burst (yds/sec²)",
@@ -299,5 +299,5 @@ guard_summary %>%
        title = "Initial Burst vs. Path Efficiency for Pulling Guards",
        subtitle = "Top-right = quick off the ball and a tight path") +
   theme(axis.title = element_text(size = 10),
-        plot.title = element_text(size = 13, hjust = 0.5),
+        plot.title = element_text(size = 14, hjust = 0.5),
         plot.subtitle = element_text(size = 10, hjust = 0.5))
